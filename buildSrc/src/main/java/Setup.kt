@@ -71,7 +71,7 @@ fun Project.setupCommon() {
     androidBase {
         compileSdkVersion(34)
         buildToolsVersion = "34.0.0"
-        ndkPath = "$sdkDirectory/ndk/magisk"
+        ndkPath = "$sdkDirectory/ndk/kitsune"
         ndkVersion = "27.0.11718014"
 
         defaultConfig {

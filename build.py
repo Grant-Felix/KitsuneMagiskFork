@@ -81,7 +81,7 @@ rust_targets = ["magisk", "magiskinit", "magiskboot", "magiskpolicy"]
 
 sdk_path = os.environ["ANDROID_SDK_ROOT"]
 ndk_root = op.join(sdk_path, "ndk")
-ndk_path = op.join(ndk_root, "magisk")
+ndk_path = op.join(ndk_root, "kitsune")
 ndk_build = op.join(ndk_path, "ndk-build")
 rust_bin = op.join(ndk_path, "toolchains", "rust", "bin")
 llvm_bin = op.join(
