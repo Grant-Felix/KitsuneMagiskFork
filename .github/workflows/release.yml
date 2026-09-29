@@ -1,14 +1,16 @@
 name: Release Kitsune Magisk
 
 # 打包并发布 APK（release + debug + stub）到 GitHub Release。
-# 触发方式：
-#   1) 推送 tag（v*）  → 用该 tag 发布
-#   2) Actions → 手动 workflow_dispatch → 可指定 tag / 版本名 / versionCode
+# 触发：① 推送 tag(v*) ② Actions → 手动 workflow_dispatch
 #
-# 想让产物是"诚实版本号"（v27.2-kitsune-4 / 27002）时，先切到对应 tag 再手动触发，并填：
+# 手动触发的典型用法（用 v27.2-kitsune-4 的源码 + 诚实版本号打包）：
+#   source_ref:   v27.2-kitsune-4
+#   tag:          v27.2-kitsune-4-selfbuild   （留空则用 source_ref 名）
 #   version:      v27.2-kitsune-4
 #   version_code: 27002
-# 不填则沿用仓库里的 config.prop（当前为 31.0-kitsune）与 gradle.properties（31000）。
+#
+# 说明：老 tag（v27.2-kitsune-4 及更早）里没有 config.prop / TestKey-2024.jks，
+# 工作流会自动从默认分支取这两个文件，从而产出与官方镜像同样签名(TestKey-2024)的 APK。
 
 on:
   push:
@@ -16,14 +18,17 @@ on:
       - 'v*'
   workflow_dispatch:
     inputs:
+      source_ref:
+        description: '要编译的源码 ref（分支或 tag，如 v27.2-kitsune-4；留空=当前 ref）'
+        required: false
       tag:
-        description: '发布 tag（留空则用当前 ref；不存在会按当前 ref 创建）'
+        description: '发布 tag（留空=source_ref/当前 ref 名；不存在会创建）'
         required: false
       version:
-        description: '覆盖 config.prop 的 version（例如 v27.2-kitsune-4）'
+        description: '覆盖 config.prop 的 version（如 v27.2-kitsune-4）'
         required: false
       version_code:
-        description: '覆盖 gradle.properties 的 magisk.versionCode（例如 27002）'
+        description: '覆盖 gradle.properties 的 magisk.versionCode（如 27002）'
         required: false
 
 permissions:
@@ -37,10 +42,26 @@ jobs:
       SCCACHE_DIRECT: false
     steps:
       - name: Check out
-        uses: actions/checkout$v4
+        uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.inputs.source_ref || github.ref }}
           submodules: "recursive"
           fetch-depth: 0
+
+      - name: Fetch config.prop / keystore from default branch if missing
+        run: |
+          set -e
+          DEF="${{ github.event.repository.default_branch }}"
+          git fetch --depth=1 origin "$DEF" || true
+          if [ ! -f config.prop ]; then
+            echo "seeding config.prop from $DEF"
+            git show "origin/$DEF:config.prop" > config.prop
+          fi
+          if [ ! -f TestKey-2024.jks ]; then
+            echo "seeding TestKey-2024.jks from $DEF"
+            git show "origin/$DEF:TestKey-2024.jks" > TestKey-2024.jks
+          fi
+          ls -l config.prop TestKey-2024.jks
 
       - name: Setup environment
         uses: ./.github/actions/setup
@@ -59,7 +80,7 @@ jobs:
           if [ -n "${{ github.event.inputs.version_code }}" ]; then
             sed -i "s|^magisk.versionCode=.*|magisk.versionCode=${{ github.event.inputs.version_code }}|" gradle.properties
           fi
-          echo '--- config.prop'; grep -E '^version=' config.prop || true
+          echo '--- config.prop'; grep -E '^version=|^keyStore=' config.prop || true
           echo '--- gradle.properties'; grep -E '^magisk\.' gradle.properties || true
 
       - name: Build release
@@ -78,6 +99,7 @@ jobs:
           VERSION="$(sed -n 's/^version=//p' config.prop | head -1)"
           [ -n "$VERSION" ] || VERSION="$(git rev-parse --short=8 HEAD)"
           TAG="${{ github.event.inputs.tag }}"
+          [ -n "$TAG" ] || TAG="${{ github.event.inputs.source_ref }}"
           [ -n "$TAG" ] || TAG="${{ github.ref_name }}"
           {
             echo "version=$VERSION"
@@ -91,8 +113,8 @@ jobs:
           set -e
           V="${{ steps.ver.outputs.version }}"
           cd out
-          cp -f app-release.apk "Kitsune.Magisk.release.${V}.apk"
-          cp -f app-debug.apk   "Kitsune.Magisk.debug.${V}.apk"
+          mv -f app-release.apk "Kitsune.Magisk.release.$V.apk"
+          mv -f app-debug.apk   "Kitsune.Magisk.debug.$V.apk"
           ls -l
 
       - name: Publish GitHub release
@@ -106,6 +128,6 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" $FILES --clobber
           else
-            gh release create "$TAG" --target "${{ github.ref_name }}" --title "$TITLE" --generate-notes $FILES
+            gh release create "$TAG" --target "${{ github.event.inputs.source_ref || github.ref_name }}" --title "$TITLE" --generate-notes $FILES
           fi
           gh release view "$TAG" --json name,tagName,assets --jq '{name, tagName, assets: [.assets[] | {name, size}]}'
