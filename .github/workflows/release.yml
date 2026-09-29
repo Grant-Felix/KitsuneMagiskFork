@@ -1,0 +1,111 @@
+name: Release Kitsune Magisk
+
+# 打包并发布 APK（release + debug + stub）到 GitHub Release。
+# 触发方式：
+#   1) 推送 tag（v*）  → 用该 tag 发布
+#   2) Actions → 手动 workflow_dispatch → 可指定 tag / 版本名 / versionCode
+#
+# 想让产物是"诚实版本号"（v27.2-kitsune-4 / 27002）时，先切到对应 tag 再手动触发，并填：
+#   version:      v27.2-kitsune-4
+#   version_code: 27002
+# 不填则沿用仓库里的 config.prop（当前为 31.0-kitsune）与 gradle.properties（31000）。
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '发布 tag（留空则用当前 ref；不存在会按当前 ref 创建）'
+        required: false
+      version:
+        description: '覆盖 config.prop 的 version（例如 v27.2-kitsune-4）'
+        required: false
+      version_code:
+        description: '覆盖 gradle.properties 的 magisk.versionCode（例如 27002）'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIRECT: false
+    steps:
+      - name: Check out
+        uses: actions/checkout$v4
+        with:
+          submodules: "recursive"
+          fetch-depth: 0
+
+      - name: Setup environment
+        uses: ./.github/actions/setup
+
+      - name: Override version (optional)
+        if: ${{ github.event.inputs.version != '' || github.event.inputs.version_code != '' }}
+        run: |
+          set -e
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            if grep -q '^version=' config.prop; then
+              sed -i "s|^version=.*|version=${{ github.event.inputs.version }}|" config.prop
+            else
+              printf 'version=${{ github.event.inputs.version }}\n' >> config.prop
+            fi
+          fi
+          if [ -n "${{ github.event.inputs.version_code }}" ]; then
+            sed -i "s|^magisk.versionCode=.*|magisk.versionCode=${{ github.event.inputs.version_code }}|" gradle.properties
+          fi
+          echo '--- config.prop'; grep -E '^version=' config.prop || true
+          echo '--- gradle.properties'; grep -E '^magisk\.' gradle.properties || true
+
+      - name: Build release
+        run: ./build.py -vr all
+
+      - name: Build debug
+        run: ./build.py -v all
+
+      - name: Stop gradle daemon
+        run: ./gradlew --stop
+
+      - name: Determine version and tag
+        id: ver
+        run: |
+          set -e
+          VERSION="$(sed -n 's/^version=//p' config.prop | head -1)"
+          [ -n "$VERSION" ] || VERSION="$(git rev-parse --short=8 HEAD)"
+          TAG="${{ github.event.inputs.tag }}"
+          [ -n "$TAG" ] || TAG="${{ github.ref_name }}"
+          {
+            echo "version=$VERSION"
+            echo "tag=$TAG"
+          } >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION tag=$TAG"
+          ls -l out
+
+      - name: Prepare assets
+        run: |
+          set -e
+          V="${{ steps.ver.outputs.version }}"
+          cd out
+          cp -f app-release.apk "Kitsune.Magisk.release.${V}.apk"
+          cp -f app-debug.apk   "Kitsune.Magisk.debug.${V}.apk"
+          ls -l
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          TAG="${{ steps.ver.outputs.tag }}"
+          TITLE="Kitsune Magisk ${{ steps.ver.outputs.version }}"
+          FILES="out/Kitsune.Magisk.release.*.apk out/Kitsune.Magisk.debug.*.apk out/stub-release.apk out/stub-debug.apk"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" $FILES --clobber
+          else
+            gh release create "$TAG" --target "${{ github.ref_name }}" --title "$TITLE" --generate-notes $FILES
+          fi
+          gh release view "$TAG" --json name,tagName,assets --jq '{name, tagName, assets: [.assets[] | {name, size}]}'
